@@ -1,5 +1,6 @@
 #include "../include/CudaTimer.h"
 #include "../include/StopWatch.h"
+#include <curand.h>
 #include <curand_kernel.h>
 #include <iomanip>
 #include <iostream>
@@ -15,17 +16,18 @@ __global__ void vector_add_kernel(const double *a, const double *b,
   }
 }
 
+// NOTE : too slow for initialization; used curandGenerator_t instead
 // Kernel for random initialization on GPU
-__global__ void init_random_kernel(double *a, double *b, int n,
-                                   unsigned long seed) {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < n) {
-    curandState state;
-    curand_init(seed, idx, 0, &state); // each thread gets unique sequence
-    a[idx] = curand_uniform_double(&state) * 100.0;
-    b[idx] = curand_uniform_double(&state) * 100.0;
-  }
-}
+// __global__ void init_random_kernel(double *a, double *b, int n,
+//                                    unsigned long seed) {
+//   int idx = blockIdx.x * blockDim.x + threadIdx.x;
+//   if (idx < n) {
+//     curandState state;
+//     curand_init(seed, idx, 0, &state); // each thread gets unique sequence
+//     a[idx] = curand_uniform_double(&state);
+//     b[idx] = curand_uniform_double(&state);
+//   }
+// }
 
 // Fill vectors a and b with random doubles on the CPU
 void fill_vectors_random_cpu(std::vector<double> &a, std::vector<double> &b,
@@ -34,7 +36,7 @@ void fill_vectors_random_cpu(std::vector<double> &a, std::vector<double> &b,
   std::mt19937 gen(42); // fixed seed for reproducability
 
   // doubles between 0.0 and 100.0
-  std::uniform_real_distribution<double> dist(0.0, 100.0);
+  std::uniform_real_distribution<double> dist(0.0, 1.0);
 
   // fill array
   for (long i = 0; i < n; i++) {
@@ -43,12 +45,18 @@ void fill_vectors_random_cpu(std::vector<double> &a, std::vector<double> &b,
   }
 }
 
-void fill_vectors_random_gpu(double *d_a, double *d_b, long n, int blockSize) {
+void fill_vectors_random_gpu(double *d_a, double *d_b, long n) {
+  curandGenerator_t gen;
+  curandCreateGenerator(&gen, CURAND_RNG_PSEUDO_DEFAULT);
+  curandSetPseudoRandomGeneratorSeed(gen, 42);
+
   CudaTimer ct;
-  int numBlocks = (n + blockSize - 1) / blockSize;
   ct.start();
-  init_random_kernel<<<numBlocks, blockSize>>>(d_a, d_b, n, 42);
+  curandGenerateUniformDouble(gen, d_a, n);
+  curandGenerateUniformDouble(gen, d_b, n);
   std::cout << "GPU init:        " << ct.elapsedTime() << "s\n";
+
+  curandDestroyGenerator(gen);
 }
 
 void add_vectors_cpu(const std::vector<double> &a, const std::vector<double> &b,
@@ -150,7 +158,7 @@ int main() {
   cudaMalloc(&d_result, bytes);
 
   // GPU initialization
-  fill_vectors_random_gpu(d_a, d_b, n, blockSize);
+  fill_vectors_random_gpu(d_a, d_b, n);
 
   // GPU addition
   CudaTimer ct;
