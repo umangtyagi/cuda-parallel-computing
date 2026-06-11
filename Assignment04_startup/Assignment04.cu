@@ -197,6 +197,71 @@ float chamfer_distance(const std::vector<Point3D> &cloud1,
   return (total_distance1 / cloud1.size()) + (total_distance2 / cloud2.size());
 }
 
+// CUDA kernel to compute the nearest distances for each point in cloud1 to
+// cloud2
+__global__ void chamfer_distance_kernel(const Point3D *cloud1, int n,
+                                        const Point3D *cloud2, int m,
+                                        float *distances) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  if (idx >= n)
+    return;
+
+  Point3D p1 = cloud1[idx];
+  float min_dist = FLT_MAX;
+
+  for (int j = 0; j < m; j++) {
+    float dx = p1.x - cloud2[j].x;
+    float dy = p1.y - cloud2[j].y;
+    float dz = p1.z - cloud2[j].z;
+    float dist = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (dist < min_dist)
+      min_dist = dist;
+  }
+
+  distances[idx] = min_dist;
+}
+
+float chamfer_distance_gpu(const std::vector<Point3D> &cloud1,
+                           const std::vector<Point3D> &cloud2) {
+  int n1 = cloud1.size(), n2 = cloud2.size();
+
+  Point3D *d_c1, *d_c2;
+  float *d_dists1, *d_dists2;
+
+  cudaMalloc(&d_c1, n1 * sizeof(Point3D));
+  cudaMalloc(&d_c2, n2 * sizeof(Point3D));
+  cudaMalloc(&d_dists1, n1 * sizeof(float));
+  cudaMalloc(&d_dists2, n2 * sizeof(float));
+
+  cudaMemcpy(d_c1, cloud1.data(), n1 * sizeof(Point3D), cudaMemcpyHostToDevice);
+  cudaMemcpy(d_c2, cloud2.data(), n2 * sizeof(Point3D), cudaMemcpyHostToDevice);
+
+  int threads = 256;
+  chamfer_distance_kernel<<<(n1 + threads - 1) / threads, threads>>>(
+      d_c1, n1, d_c2, n2, d_dists1);
+  chamfer_distance_kernel<<<(n2 + threads - 1) / threads, threads>>>(
+      d_c2, n2, d_c1, n1, d_dists2);
+  cudaDeviceSynchronize();
+
+  std::vector<float> h_dists1(n1), h_dists2(n2);
+  cudaMemcpy(h_dists1.data(), d_dists1, n1 * sizeof(float),
+             cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_dists2.data(), d_dists2, n2 * sizeof(float),
+             cudaMemcpyDeviceToHost);
+
+  cudaFree(d_c1);
+  cudaFree(d_c2);
+  cudaFree(d_dists1);
+  cudaFree(d_dists2);
+
+  float sum1 = 0, sum2 = 0;
+  for (float d : h_dists1)
+    sum1 += d;
+  for (float d : h_dists2)
+    sum2 += d;
+
+  return (sum1 / n1) + (sum2 / n2);
+}
 // ------------------------------------ PCD FILE
 // ------------------------------------
 std::vector<Point3D> readPCD(const std::string &filename) {
@@ -485,11 +550,16 @@ int main() {
             std::to_string(max_score_index) + ".pcd";
         savePCD(reconstructed_file, reconstructed_points);
 
+        // [mod] moved chmafer distance calculation CPU -> GPU
         // Calculate the chafer distance
+        // double cd_before_nbv =
+        //     chamfer_distance(all_visbile_points, view_point_visible_points);
+        // double cd_after_nbv =
+        //     chamfer_distance(all_visbile_points, reconstructed_points);
         double cd_before_nbv =
-            chamfer_distance(all_visbile_points, view_point_visible_points);
+            chamfer_distance_gpu(all_visbile_points, view_point_visible_points);
         double cd_after_nbv =
-            chamfer_distance(all_visbile_points, reconstructed_points);
+            chamfer_distance_gpu(all_visbile_points, reconstructed_points);
 
         std::cout << "Number of visible points before NBV: "
                   << view_point_visible_points.size() << std::endl;
